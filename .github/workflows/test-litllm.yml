@@ -1,0 +1,79 @@
+name: Test LiteLLM via Tailscale (hardened)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-litellm-access:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Harden the runner (egress audit only)
+      uses: step-security/harden-runner@c6295a65d1254861815972266d5933fd6e532bdf # v2.11.1
+      with:
+        egress-policy: audit
+
+    - name: Connect to Tailscale
+      uses: tailscale/github-action@a392da0a182bba0e9613b6243ebd69529b1878aa # v4.1.0
+      with:
+        oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+        oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+        tags: tag:ci
+
+    - name: Show Tailscale status
+      run: |
+        echo "🔗 Tailscale status:"
+        tailscale status
+
+    - name: Test LiteLLM health endpoint
+      env:
+        LITELLM_HOST: ${{ secrets.LITELLM_HOST }}
+        LITELLM_PORT: ${{ secrets.LITELLM_PORT }}
+      run: |
+        set -e
+        echo "🧪 Testing LiteLLM health ..."
+        RESPONSE="$(curl -ksS -w '\n%{http_code}' https://$LITELLM_HOST:$LITELLM_PORT/health || true)"
+        HTTP_CODE="$(echo "$RESPONSE" | tail -n1)"
+        BODY="$(echo "$RESPONSE" | head -n-1)"
+
+        echo "HTTP status: $HTTP_CODE"
+        echo "Body: $BODY"
+
+        if [ "$HTTP_CODE" != "200" ]; then
+          echo "❌ Health check failed"
+          exit 1
+        fi
+        echo "✅ Health check OK"
+
+    - name: Test simple LiteLLM chat completion
+      env:
+        LITELLM_HOST: ${{ secrets.LITELLM_HOST }}
+        LITELLM_PORT: ${{ secrets.LITELLM_PORT }}
+      run: |
+        set -e
+        echo "🚀 Testing LiteLLM /v1/chat/completions ..."
+        curl -ksS -X POST "https://$LITELLM_HOST:$LITELLM_PORT/v1/chat/completions" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "model": "gpt-4",
+            "messages": [
+              {"role": "user", "content": "Say hello in one short sentence."}
+            ],
+            "max_tokens": 16
+          }' | tee response.json
+
+        if grep -q '"choices"' response.json; then
+          echo "✅ LiteLLM responded successfully"
+        else
+          echo "❌ LiteLLM response did not contain choices"
+          cat response.json
+          exit 1
+        fi
+
+    - name: Summary
+      if: always()
+      run: |
+        echo "## 🔐 Hardened LiteLLM Connectivity Test" >> $GITHUB_STEP_SUMMARY
+        echo "- StepSecurity Harden-Runner: enabled (egress audit)" >> $GITHUB_STEP_SUMMARY
+        echo "- Tailscale connection: see logs above" >> $GITHUB_STEP_SUMMARY
+        echo "- LiteLLM health + simple chat: see logs above" >> $GITHUB_STEP_SUMMARY
